@@ -1,21 +1,25 @@
-from twilio.rest import Client
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import psycopg2
+import requests
 import os
 import math
+
 
 app = FastAPI(title="Accident Emergency Server")
 
 
 # ============================================================
-# DATABASE CONNECTION
+# ENVIRONMENT VARIABLES
 # ============================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
+FAST2SMS_API_KEY = os.getenv("FAST2SMS_API_KEY")
+
+
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
 
 def get_connection():
 
@@ -24,46 +28,106 @@ def get_connection():
 
     return psycopg2.connect(DATABASE_URL)
 
+
+# ============================================================
+# SEND EMERGENCY SMS USING FAST2SMS
+# ============================================================
+
 def send_emergency_sms(phone, data, hospital):
+
     try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+        if not FAST2SMS_API_KEY:
+            raise Exception("FAST2SMS_API_KEY environment variable not found")
+
+        # Convert +91XXXXXXXXXX -> XXXXXXXXXX
+        clean_phone = (
+            phone
+            .replace("+91", "")
+            .replace(" ", "")
+            .replace("-", "")
+        )
 
         message_text = (
-            f"EMERGENCY ALERT\n"
+            f"EMERGENCY ACCIDENT ALERT\n"
             f"Vehicle: {data.vehicle_id}\n"
             f"Impact: {data.impact}\n"
             f"Heart Rate: {data.heart_rate} BPM\n"
             f"SpO2: {data.spo2}%\n"
             f"Location: {data.latitude}, {data.longitude}\n"
-            f"Hospital: {hospital['name']}"
+            f"Hospital: {hospital['name']}\n"
+            f"Emergency assistance requested."
         )
 
-        message = client.messages.create(
-            body=message_text,
-            from_=TWILIO_FROM_NUMBER,
-            to=phone
+        url = "https://www.fast2sms.com/dev/bulkV2"
+
+        headers = {
+            "authorization": FAST2SMS_API_KEY
+        }
+
+        payload = {
+            "route": "q",
+            "message": message_text,
+            "language": "english",
+            "flash": 0,
+            "numbers": clean_phone
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            data=payload,
+            timeout=15
         )
 
-        print("SMS sent successfully")
-        print("Message SID:", message.sid)
+        # Try reading JSON response
+        try:
+            result = response.json()
+
+        except Exception:
+            result = {
+                "raw_response": response.text
+            }
+
+        print("\n---------- FAST2SMS RESPONSE ----------")
+        print(result)
+        print("---------------------------------------")
+
+        if response.ok and result.get("return") is True:
+
+            print("SMS request accepted successfully")
+
+            return {
+                "success": True,
+                "provider": "Fast2SMS",
+                "response": result
+            }
+
+        print("SMS sending failed")
 
         return {
-            "success": True,
-            "message_sid": message.sid
+            "success": False,
+            "provider": "Fast2SMS",
+            "response": result
         }
 
     except Exception as e:
+
         print("SMS sending failed:", str(e))
 
         return {
             "success": False,
+            "provider": "Fast2SMS",
             "error": str(e)
         }
+
+
 # ============================================================
 # DATA MODELS
 # ============================================================
 
 class HospitalData(BaseModel):
+
     name: str
     latitude: float
     longitude: float
@@ -71,12 +135,16 @@ class HospitalData(BaseModel):
 
 
 class AccidentData(BaseModel):
+
     vehicle_id: str
     impact: str
+
     latitude: float
     longitude: float
+
     heart_rate: int
     spo2: int
+
     driver_response: bool
 
 
@@ -92,10 +160,15 @@ def create_tables():
     # Hospital table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS hospitals (
+
             id SERIAL PRIMARY KEY,
+
             name TEXT NOT NULL,
+
             latitude DOUBLE PRECISION NOT NULL,
+
             longitude DOUBLE PRECISION NOT NULL,
+
             phone TEXT
         )
     """)
@@ -103,16 +176,27 @@ def create_tables():
     # Emergency alert table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS emergency_alerts (
+
             id SERIAL PRIMARY KEY,
+
             vehicle_id TEXT NOT NULL,
+
             impact TEXT,
+
             latitude DOUBLE PRECISION,
+
             longitude DOUBLE PRECISION,
+
             heart_rate INTEGER,
+
             spo2 INTEGER,
+
             hospital_name TEXT,
+
             hospital_phone TEXT,
+
             status TEXT DEFAULT 'PENDING',
+
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -123,7 +207,7 @@ def create_tables():
     conn.close()
 
 
-# Create tables when server starts
+# Create database tables when server starts
 create_tables()
 
 
@@ -178,6 +262,7 @@ def find_nearest_hospital(latitude, longitude):
             latitude,
             longitude,
             phone
+
         FROM hospitals
     """)
 
@@ -187,6 +272,7 @@ def find_nearest_hospital(latitude, longitude):
     conn.close()
 
     nearest = None
+
     minimum_distance = float("inf")
 
     for hospital in hospitals:
@@ -203,11 +289,17 @@ def find_nearest_hospital(latitude, longitude):
             minimum_distance = distance
 
             nearest = {
+
                 "id": hospital[0],
+
                 "name": hospital[1],
+
                 "latitude": hospital[2],
+
                 "longitude": hospital[3],
+
                 "phone": hospital[4],
+
                 "distance_km": round(distance, 2)
             }
 
@@ -225,30 +317,58 @@ def create_emergency_alert(data, hospital):
 
     cursor.execute("""
         INSERT INTO emergency_alerts (
+
             vehicle_id,
+
             impact,
+
             latitude,
+
             longitude,
+
             heart_rate,
+
             spo2,
+
             hospital_name,
+
             hospital_phone,
+
             status
         )
 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s
+        )
 
         RETURNING id
 
     """, (
+
         data.vehicle_id,
+
         data.impact,
+
         data.latitude,
+
         data.longitude,
+
         data.heart_rate,
+
         data.spo2,
+
         hospital["name"],
+
         hospital["phone"],
+
         "PENDING"
     ))
 
@@ -270,9 +390,14 @@ def create_emergency_alert(data, hospital):
 def home():
 
     return {
+
         "status": "online",
+
         "message": "Accident Emergency Server is running",
-        "database": "PostgreSQL"
+
+        "database": "PostgreSQL",
+
+        "sms_provider": "Fast2SMS"
     }
 
 
@@ -288,20 +413,33 @@ def add_hospital(hospital: HospitalData):
 
     cursor.execute("""
         INSERT INTO hospitals (
+
             name,
+
             latitude,
+
             longitude,
+
             phone
         )
 
-        VALUES (%s, %s, %s, %s)
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s
+        )
 
         RETURNING id
 
     """, (
+
         hospital.name,
+
         hospital.latitude,
+
         hospital.longitude,
+
         hospital.phone
     ))
 
@@ -313,8 +451,11 @@ def add_hospital(hospital: HospitalData):
     conn.close()
 
     return {
+
         "success": True,
+
         "message": "Hospital added successfully",
+
         "hospital_id": hospital_id
     }
 
@@ -331,11 +472,17 @@ def get_hospitals():
 
     cursor.execute("""
         SELECT
+
             id,
+
             name,
+
             latitude,
+
             longitude,
+
             phone
+
         FROM hospitals
 
         ORDER BY id
@@ -351,10 +498,15 @@ def get_hospitals():
     for row in rows:
 
         hospitals.append({
+
             "id": row[0],
+
             "name": row[1],
+
             "latitude": row[2],
+
             "longitude": row[3],
+
             "phone": row[4]
         })
 
@@ -378,9 +530,13 @@ def update_hospital(
         UPDATE hospitals
 
         SET
+
             name = %s,
+
             latitude = %s,
+
             longitude = %s,
+
             phone = %s
 
         WHERE id = %s
@@ -388,10 +544,15 @@ def update_hospital(
         RETURNING id
 
     """, (
+
         hospital.name,
+
         hospital.latitude,
+
         hospital.longitude,
+
         hospital.phone,
+
         hospital_id
     ))
 
@@ -410,7 +571,9 @@ def update_hospital(
         )
 
     return {
+
         "success": True,
+
         "message": "Hospital updated successfully"
     }
 
@@ -427,9 +590,14 @@ def delete_hospital(hospital_id: int):
 
     cursor.execute("""
         DELETE FROM hospitals
+
         WHERE id = %s
+
         RETURNING id
-    """, (hospital_id,))
+
+    """, (
+        hospital_id,
+    ))
 
     deleted = cursor.fetchone()
 
@@ -446,7 +614,9 @@ def delete_hospital(hospital_id: int):
         )
 
     return {
+
         "success": True,
+
         "message": "Hospital deleted successfully"
     }
 
@@ -459,10 +629,13 @@ def delete_hospital(hospital_id: int):
 def receive_accident(data: AccidentData):
 
     print("\n=======================================")
+
     print("          ACCIDENT RECEIVED")
+
     print("=======================================")
 
     print("Vehicle:", data.vehicle_id)
+
     print("Impact:", data.impact)
 
     print(
@@ -472,46 +645,106 @@ def receive_accident(data: AccidentData):
         data.longitude
     )
 
-    print("Heart Rate:", data.heart_rate)
-    print("SpO2:", data.spo2)
-    print("Driver Response:", data.driver_response)
+    print(
+        "Heart Rate:",
+        data.heart_rate
+    )
 
-    # Find nearest hospital
+    print(
+        "SpO2:",
+        data.spo2
+    )
+
+    print(
+        "Driver Response:",
+        data.driver_response
+    )
+
+
+    # --------------------------------------------------------
+    # FIND NEAREST HOSPITAL
+    # --------------------------------------------------------
+
     hospital = find_nearest_hospital(
         data.latitude,
         data.longitude
     )
 
+
     if hospital is None:
 
         return {
+
             "success": False,
+
             "message": "No hospitals available"
         }
 
+
     print("\n---------- NEAREST HOSPITAL ----------")
 
-    print("Hospital:", hospital["name"])
-    print("Distance:", hospital["distance_km"], "km")
-    print("Phone:", hospital["phone"])
+    print(
+        "Hospital:",
+        hospital["name"]
+    )
 
-    # Create emergency alert
+    print(
+        "Distance:",
+        hospital["distance_km"],
+        "km"
+    )
+
+    print(
+        "Phone:",
+        hospital["phone"]
+    )
+
+
+    # --------------------------------------------------------
+    # CREATE DATABASE ALERT
+    # --------------------------------------------------------
+
     alert_id = create_emergency_alert(
         data,
         hospital
     )
+
+
+    # --------------------------------------------------------
+    # SEND REAL SMS
+    # --------------------------------------------------------
+
     sms_result = send_emergency_sms(
-    hospital["phone"],
-    data,
-    hospital
+        hospital["phone"],
+        data,
+        hospital
     )
+
+
+    # --------------------------------------------------------
+    # SERVER LOG
+    # --------------------------------------------------------
+
     print("\n=======================================")
+
     print("          EMERGENCY ALERT")
+
     print("=======================================")
 
-    print("Alert ID:", alert_id)
-    print("Vehicle:", data.vehicle_id)
-    print("Accident Type:", data.impact)
+    print(
+        "Alert ID:",
+        alert_id
+    )
+
+    print(
+        "Vehicle:",
+        data.vehicle_id
+    )
+
+    print(
+        "Accident Type:",
+        data.impact
+    )
 
     print(
         "Location:",
@@ -520,23 +753,53 @@ def receive_accident(data: AccidentData):
         data.longitude
     )
 
-    print("Heart Rate:", data.heart_rate, "BPM")
-    print("SpO2:", data.spo2, "%")
+    print(
+        "Heart Rate:",
+        data.heart_rate,
+        "BPM"
+    )
+
+    print(
+        "SpO2:",
+        data.spo2,
+        "%"
+    )
 
     print("\nSEND TO:")
-    print("Hospital:", hospital["name"])
-    print("Phone:", hospital["phone"])
+
+    print(
+        "Hospital:",
+        hospital["name"]
+    )
+
+    print(
+        "Phone:",
+        hospital["phone"]
+    )
 
     print("\nStatus: PENDING")
+
     print("=======================================\n")
 
+
+    # --------------------------------------------------------
+    # API RESPONSE
+    # --------------------------------------------------------
+
     return {
+
         "success": True,
+
         "message": "Emergency alert created",
+
         "alert_id": alert_id,
+
         "vehicle_id": data.vehicle_id,
+
         "nearest_hospital": hospital,
+
         "alert_status": "PENDING",
+
         "sms": sms_result
     }
 
@@ -553,16 +816,27 @@ def get_alerts():
 
     cursor.execute("""
         SELECT
+
             id,
+
             vehicle_id,
+
             impact,
+
             latitude,
+
             longitude,
+
             heart_rate,
+
             spo2,
+
             hospital_name,
+
             hospital_phone,
+
             status,
+
             created_at
 
         FROM emergency_alerts
@@ -580,16 +854,27 @@ def get_alerts():
     for row in rows:
 
         alerts.append({
+
             "alert_id": row[0],
+
             "vehicle_id": row[1],
+
             "impact": row[2],
+
             "latitude": row[3],
+
             "longitude": row[4],
+
             "heart_rate": row[5],
+
             "spo2": row[6],
+
             "hospital_name": row[7],
+
             "hospital_phone": row[8],
+
             "status": row[9],
+
             "created_at": row[10]
         })
 
