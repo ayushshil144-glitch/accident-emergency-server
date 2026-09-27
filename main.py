@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from twilio.rest import Client
 import psycopg2
-import requests
 import os
 import math
 
@@ -14,7 +14,10 @@ app = FastAPI(title="Accident Emergency Server")
 # ============================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-FAST2SMS_API_KEY = os.getenv("FAST2SMS_API_KEY")
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
 
 
 # ============================================================
@@ -30,94 +33,55 @@ def get_connection():
 
 
 # ============================================================
-# SEND EMERGENCY SMS USING FAST2SMS
+# SEND EMERGENCY SMS USING TWILIO
 # ============================================================
 
-def send_emergency_sms(phone, data, hospital):
+def send_emergency_sms(phone):
 
     try:
 
-        if not FAST2SMS_API_KEY:
-            raise Exception("FAST2SMS_API_KEY environment variable not found")
+        if not TWILIO_ACCOUNT_SID:
+            raise Exception("TWILIO_ACCOUNT_SID not found")
 
-        # Convert +91XXXXXXXXXX -> XXXXXXXXXX
-        clean_phone = (
-            phone
-            .replace("+91", "")
-            .replace(" ", "")
-            .replace("-", "")
+        if not TWILIO_AUTH_TOKEN:
+            raise Exception("TWILIO_AUTH_TOKEN not found")
+
+        if not TWILIO_FROM_NUMBER:
+            raise Exception("TWILIO_FROM_NUMBER not found")
+
+        client = Client(
+            TWILIO_ACCOUNT_SID,
+            TWILIO_AUTH_TOKEN
         )
 
-        message_text = (
-            f"EMERGENCY ACCIDENT ALERT\n"
-            f"Vehicle: {data.vehicle_id}\n"
-            f"Impact: {data.impact}\n"
-            f"Heart Rate: {data.heart_rate} BPM\n"
-            f"SpO2: {data.spo2}%\n"
-            f"Location: {data.latitude}, {data.longitude}\n"
-            f"Hospital: {hospital['name']}\n"
-            f"Emergency assistance requested."
+        # Twilio trial accounts only allow predefined SMS templates.
+        # We use the internal alerts template for the prototype.
+        message = client.messages.create(
+            body="sms_internal_alerts",
+            from_=TWILIO_FROM_NUMBER,
+            to=phone
         )
 
-        url = "https://www.fast2sms.com/dev/bulkV2"
-
-        headers = {
-            "authorization": FAST2SMS_API_KEY
-        }
-
-        payload = {
-            "route": "q",
-            "message": message_text,
-            "language": "english",
-            "flash": 0,
-            "numbers": clean_phone
-        }
-
-        response = requests.post(
-            url,
-            headers=headers,
-            data=payload,
-            timeout=15
-        )
-
-        # Try reading JSON response
-        try:
-            result = response.json()
-
-        except Exception:
-            result = {
-                "raw_response": response.text
-            }
-
-        print("\n---------- FAST2SMS RESPONSE ----------")
-        print(result)
-        print("---------------------------------------")
-
-        if response.ok and result.get("return") is True:
-
-            print("SMS request accepted successfully")
-
-            return {
-                "success": True,
-                "provider": "Fast2SMS",
-                "response": result
-            }
-
-        print("SMS sending failed")
+        print("\n---------- TWILIO SMS ----------")
+        print("SMS request sent successfully")
+        print("Message SID:", message.sid)
+        print("--------------------------------")
 
         return {
-            "success": False,
-            "provider": "Fast2SMS",
-            "response": result
+            "success": True,
+            "provider": "Twilio",
+            "message_sid": message.sid
         }
 
     except Exception as e:
 
-        print("SMS sending failed:", str(e))
+        print("\n---------- TWILIO ERROR ----------")
+        print(str(e))
+        print("----------------------------------")
 
         return {
             "success": False,
-            "provider": "Fast2SMS",
+            "provider": "Twilio",
             "error": str(e)
         }
 
@@ -157,7 +121,6 @@ def create_tables():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Hospital table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS hospitals (
 
@@ -173,7 +136,6 @@ def create_tables():
         )
     """)
 
-    # Emergency alert table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS emergency_alerts (
 
@@ -207,7 +169,6 @@ def create_tables():
     conn.close()
 
 
-# Create database tables when server starts
 create_tables()
 
 
@@ -272,7 +233,6 @@ def find_nearest_hospital(latitude, longitude):
     conn.close()
 
     nearest = None
-
     minimum_distance = float("inf")
 
     for hospital in hospitals:
@@ -289,17 +249,11 @@ def find_nearest_hospital(latitude, longitude):
             minimum_distance = distance
 
             nearest = {
-
                 "id": hospital[0],
-
                 "name": hospital[1],
-
                 "latitude": hospital[2],
-
                 "longitude": hospital[3],
-
                 "phone": hospital[4],
-
                 "distance_km": round(distance, 2)
             }
 
@@ -319,21 +273,13 @@ def create_emergency_alert(data, hospital):
         INSERT INTO emergency_alerts (
 
             vehicle_id,
-
             impact,
-
             latitude,
-
             longitude,
-
             heart_rate,
-
             spo2,
-
             hospital_name,
-
             hospital_phone,
-
             status
         )
 
@@ -354,21 +300,13 @@ def create_emergency_alert(data, hospital):
     """, (
 
         data.vehicle_id,
-
         data.impact,
-
         data.latitude,
-
         data.longitude,
-
         data.heart_rate,
-
         data.spo2,
-
         hospital["name"],
-
         hospital["phone"],
-
         "PENDING"
     ))
 
@@ -390,14 +328,10 @@ def create_emergency_alert(data, hospital):
 def home():
 
     return {
-
         "status": "online",
-
         "message": "Accident Emergency Server is running",
-
         "database": "PostgreSQL",
-
-        "sms_provider": "Fast2SMS"
+        "sms_provider": "Twilio"
     }
 
 
@@ -413,13 +347,9 @@ def add_hospital(hospital: HospitalData):
 
     cursor.execute("""
         INSERT INTO hospitals (
-
             name,
-
             latitude,
-
             longitude,
-
             phone
         )
 
@@ -435,11 +365,8 @@ def add_hospital(hospital: HospitalData):
     """, (
 
         hospital.name,
-
         hospital.latitude,
-
         hospital.longitude,
-
         hospital.phone
     ))
 
@@ -451,11 +378,8 @@ def add_hospital(hospital: HospitalData):
     conn.close()
 
     return {
-
         "success": True,
-
         "message": "Hospital added successfully",
-
         "hospital_id": hospital_id
     }
 
@@ -472,15 +396,10 @@ def get_hospitals():
 
     cursor.execute("""
         SELECT
-
             id,
-
             name,
-
             latitude,
-
             longitude,
-
             phone
 
         FROM hospitals
@@ -498,15 +417,10 @@ def get_hospitals():
     for row in rows:
 
         hospitals.append({
-
             "id": row[0],
-
             "name": row[1],
-
             "latitude": row[2],
-
             "longitude": row[3],
-
             "phone": row[4]
         })
 
@@ -530,13 +444,9 @@ def update_hospital(
         UPDATE hospitals
 
         SET
-
             name = %s,
-
             latitude = %s,
-
             longitude = %s,
-
             phone = %s
 
         WHERE id = %s
@@ -546,13 +456,9 @@ def update_hospital(
     """, (
 
         hospital.name,
-
         hospital.latitude,
-
         hospital.longitude,
-
         hospital.phone,
-
         hospital_id
     ))
 
@@ -571,9 +477,7 @@ def update_hospital(
         )
 
     return {
-
         "success": True,
-
         "message": "Hospital updated successfully"
     }
 
@@ -594,7 +498,6 @@ def delete_hospital(hospital_id: int):
         WHERE id = %s
 
         RETURNING id
-
     """, (
         hospital_id,
     ))
@@ -614,9 +517,7 @@ def delete_hospital(hospital_id: int):
         )
 
     return {
-
         "success": True,
-
         "message": "Hospital deleted successfully"
     }
 
@@ -629,13 +530,10 @@ def delete_hospital(hospital_id: int):
 def receive_accident(data: AccidentData):
 
     print("\n=======================================")
-
     print("          ACCIDENT RECEIVED")
-
     print("=======================================")
 
     print("Vehicle:", data.vehicle_id)
-
     print("Impact:", data.impact)
 
     print(
@@ -670,13 +568,10 @@ def receive_accident(data: AccidentData):
         data.longitude
     )
 
-
     if hospital is None:
 
         return {
-
             "success": False,
-
             "message": "No hospitals available"
         }
 
@@ -701,7 +596,7 @@ def receive_accident(data: AccidentData):
 
 
     # --------------------------------------------------------
-    # CREATE DATABASE ALERT
+    # CREATE ALERT IN POSTGRESQL
     # --------------------------------------------------------
 
     alert_id = create_emergency_alert(
@@ -711,13 +606,11 @@ def receive_accident(data: AccidentData):
 
 
     # --------------------------------------------------------
-    # SEND REAL SMS
+    # SEND REAL SMS USING TWILIO
     # --------------------------------------------------------
 
     sms_result = send_emergency_sms(
-        hospital["phone"],
-        data,
-        hospital
+        hospital["phone"]
     )
 
 
@@ -726,9 +619,7 @@ def receive_accident(data: AccidentData):
     # --------------------------------------------------------
 
     print("\n=======================================")
-
     print("          EMERGENCY ALERT")
-
     print("=======================================")
 
     print(
@@ -777,6 +668,8 @@ def receive_accident(data: AccidentData):
         hospital["phone"]
     )
 
+    print("\nSMS Result:", sms_result)
+
     print("\nStatus: PENDING")
 
     print("=======================================\n")
@@ -787,19 +680,12 @@ def receive_accident(data: AccidentData):
     # --------------------------------------------------------
 
     return {
-
         "success": True,
-
         "message": "Emergency alert created",
-
         "alert_id": alert_id,
-
         "vehicle_id": data.vehicle_id,
-
         "nearest_hospital": hospital,
-
         "alert_status": "PENDING",
-
         "sms": sms_result
     }
 
@@ -816,27 +702,16 @@ def get_alerts():
 
     cursor.execute("""
         SELECT
-
             id,
-
             vehicle_id,
-
             impact,
-
             latitude,
-
             longitude,
-
             heart_rate,
-
             spo2,
-
             hospital_name,
-
             hospital_phone,
-
             status,
-
             created_at
 
         FROM emergency_alerts
@@ -854,27 +729,16 @@ def get_alerts():
     for row in rows:
 
         alerts.append({
-
             "alert_id": row[0],
-
             "vehicle_id": row[1],
-
             "impact": row[2],
-
             "latitude": row[3],
-
             "longitude": row[4],
-
             "heart_rate": row[5],
-
             "spo2": row[6],
-
             "hospital_name": row[7],
-
             "hospital_phone": row[8],
-
             "status": row[9],
-
             "created_at": row[10]
         })
 
