@@ -1,12 +1,29 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from twilio.rest import Client
+
 import psycopg2
 import os
 import math
+import secrets
 
 
-app = FastAPI(title="Accident Emergency Server")
+# ============================================================
+# APP
+# Disable default Swagger/OpenAPI URLs.
+# We create protected versions ourselves below.
+# ============================================================
+
+app = FastAPI(
+    title="Accident Emergency Server",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None
+)
 
 
 # ============================================================
@@ -19,21 +36,126 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
 
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+
+DEVICE_API_KEY = os.getenv("DEVICE_API_KEY")
+
 
 # ============================================================
-# DATABASE CONNECTION
+# SECURITY
+# ============================================================
+
+security = HTTPBasic()
+
+
+def verify_admin(
+    credentials: HTTPBasicCredentials = Depends(security)
+):
+
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=500,
+            detail="Admin authentication is not configured"
+        )
+
+    username_correct = secrets.compare_digest(
+        credentials.username,
+        ADMIN_USERNAME
+    )
+
+    password_correct = secrets.compare_digest(
+        credentials.password,
+        ADMIN_PASSWORD
+    )
+
+    if not (username_correct and password_correct):
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin username or password",
+            headers={
+                "WWW-Authenticate": "Basic"
+            }
+        )
+
+    return True
+
+
+def verify_device_api_key(
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+
+    if not DEVICE_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Device API key is not configured"
+        )
+
+    if not x_api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Device API key required"
+        )
+
+    if not secrets.compare_digest(
+        x_api_key,
+        DEVICE_API_KEY
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid device API key"
+        )
+
+    return True
+
+
+# ============================================================
+# PROTECTED SWAGGER DOCS
+# ============================================================
+
+@app.get("/docs", include_in_schema=False)
+def protected_docs(
+    request: Request,
+    authenticated: bool = Depends(verify_admin)
+):
+
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="Accident Emergency Server - Admin"
+    )
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def protected_openapi(
+    authenticated: bool = Depends(verify_admin)
+):
+
+    return JSONResponse(
+        get_openapi(
+            title=app.title,
+            version="1.0.0",
+            routes=app.routes
+        )
+    )
+
+
+# ============================================================
+# DATABASE
 # ============================================================
 
 def get_connection():
 
     if not DATABASE_URL:
-        raise Exception("DATABASE_URL environment variable not found")
+        raise Exception(
+            "DATABASE_URL environment variable not found"
+        )
 
     return psycopg2.connect(DATABASE_URL)
 
 
 # ============================================================
-# SEND EMERGENCY SMS USING TWILIO
+# TWILIO SMS
 # ============================================================
 
 def send_emergency_sms(phone):
@@ -41,31 +163,34 @@ def send_emergency_sms(phone):
     try:
 
         if not TWILIO_ACCOUNT_SID:
-            raise Exception("TWILIO_ACCOUNT_SID not found")
+            raise Exception(
+                "TWILIO_ACCOUNT_SID not configured"
+            )
 
         if not TWILIO_AUTH_TOKEN:
-            raise Exception("TWILIO_AUTH_TOKEN not found")
+            raise Exception(
+                "TWILIO_AUTH_TOKEN not configured"
+            )
 
         if not TWILIO_FROM_NUMBER:
-            raise Exception("TWILIO_FROM_NUMBER not found")
+            raise Exception(
+                "TWILIO_FROM_NUMBER not configured"
+            )
 
         client = Client(
             TWILIO_ACCOUNT_SID,
             TWILIO_AUTH_TOKEN
         )
 
-        # Twilio trial accounts only allow predefined SMS templates.
-        # We use the internal alerts template for the prototype.
+        # Twilio trial predefined template
         message = client.messages.create(
             body="sms_internal_alerts",
             from_=TWILIO_FROM_NUMBER,
             to=phone
         )
 
-        print("\n---------- TWILIO SMS ----------")
-        print("SMS request sent successfully")
-        print("Message SID:", message.sid)
-        print("--------------------------------")
+        print("SMS sent successfully")
+        print("Twilio SID:", message.sid)
 
         return {
             "success": True,
@@ -75,9 +200,10 @@ def send_emergency_sms(phone):
 
     except Exception as e:
 
-        print("\n---------- TWILIO ERROR ----------")
-        print(str(e))
-        print("----------------------------------")
+        print(
+            "SMS sending failed:",
+            str(e)
+        )
 
         return {
             "success": False,
@@ -113,7 +239,7 @@ class AccidentData(BaseModel):
 
 
 # ============================================================
-# CREATE DATABASE TABLES
+# CREATE TABLES
 # ============================================================
 
 def create_tables():
@@ -173,10 +299,15 @@ create_tables()
 
 
 # ============================================================
-# HAVERSINE DISTANCE
+# DISTANCE
 # ============================================================
 
-def calculate_distance(lat1, lon1, lat2, lon2):
+def calculate_distance(
+    lat1,
+    lon1,
+    lat2,
+    lon2
+):
 
     R = 6371
 
@@ -211,7 +342,10 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 # FIND NEAREST HOSPITAL
 # ============================================================
 
-def find_nearest_hospital(latitude, longitude):
+def find_nearest_hospital(
+    latitude,
+    longitude
+):
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -254,17 +388,23 @@ def find_nearest_hospital(latitude, longitude):
                 "latitude": hospital[2],
                 "longitude": hospital[3],
                 "phone": hospital[4],
-                "distance_km": round(distance, 2)
+                "distance_km": round(
+                    distance,
+                    2
+                )
             }
 
     return nearest
 
 
 # ============================================================
-# CREATE EMERGENCY ALERT
+# CREATE ALERT
 # ============================================================
 
-def create_emergency_alert(data, hospital):
+def create_emergency_alert(
+    data,
+    hospital
+):
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -296,7 +436,6 @@ def create_emergency_alert(data, hospital):
         )
 
         RETURNING id
-
     """, (
 
         data.vehicle_id,
@@ -321,7 +460,7 @@ def create_emergency_alert(data, hospital):
 
 
 # ============================================================
-# HOME
+# PUBLIC HOME
 # ============================================================
 
 @app.get("/")
@@ -329,18 +468,21 @@ def home():
 
     return {
         "status": "online",
-        "message": "Accident Emergency Server is running",
-        "database": "PostgreSQL",
-        "sms_provider": "Twilio"
+        "message": "Accident Emergency Server"
     }
 
 
 # ============================================================
-# ADD HOSPITAL
+# ADMIN - ADD HOSPITAL
 # ============================================================
 
-@app.post("/api/hospitals")
-def add_hospital(hospital: HospitalData):
+@app.post(
+    "/api/hospitals",
+    dependencies=[Depends(verify_admin)]
+)
+def add_hospital(
+    hospital: HospitalData
+):
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -361,7 +503,6 @@ def add_hospital(hospital: HospitalData):
         )
 
         RETURNING id
-
     """, (
 
         hospital.name,
@@ -379,16 +520,20 @@ def add_hospital(hospital: HospitalData):
 
     return {
         "success": True,
-        "message": "Hospital added successfully",
+        "message":
+            "Hospital added successfully",
         "hospital_id": hospital_id
     }
 
 
 # ============================================================
-# VIEW ALL HOSPITALS
+# ADMIN - VIEW HOSPITALS
 # ============================================================
 
-@app.get("/api/hospitals")
+@app.get(
+    "/api/hospitals",
+    dependencies=[Depends(verify_admin)]
+)
 def get_hospitals():
 
     conn = get_connection()
@@ -428,10 +573,13 @@ def get_hospitals():
 
 
 # ============================================================
-# UPDATE HOSPITAL
+# ADMIN - UPDATE HOSPITAL
 # ============================================================
 
-@app.put("/api/hospitals/{hospital_id}")
+@app.put(
+    "/api/hospitals/{hospital_id}",
+    dependencies=[Depends(verify_admin)]
+)
 def update_hospital(
     hospital_id: int,
     hospital: HospitalData
@@ -452,7 +600,6 @@ def update_hospital(
         WHERE id = %s
 
         RETURNING id
-
     """, (
 
         hospital.name,
@@ -478,16 +625,22 @@ def update_hospital(
 
     return {
         "success": True,
-        "message": "Hospital updated successfully"
+        "message":
+            "Hospital updated successfully"
     }
 
 
 # ============================================================
-# DELETE HOSPITAL
+# ADMIN - DELETE HOSPITAL
 # ============================================================
 
-@app.delete("/api/hospitals/{hospital_id}")
-def delete_hospital(hospital_id: int):
+@app.delete(
+    "/api/hospitals/{hospital_id}",
+    dependencies=[Depends(verify_admin)]
+)
+def delete_hospital(
+    hospital_id: int
+):
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -518,114 +671,28 @@ def delete_hospital(hospital_id: int):
 
     return {
         "success": True,
-        "message": "Hospital deleted successfully"
+        "message":
+            "Hospital deleted successfully"
     }
 
 
 # ============================================================
-# RECEIVE ACCIDENT
+# DEVICE - RECEIVE ACCIDENT
 # ============================================================
 
-@app.post("/api/accident")
-def receive_accident(data: AccidentData):
+@app.post(
+    "/api/accident",
+    dependencies=[
+        Depends(verify_device_api_key)
+    ]
+)
+def receive_accident(
+    data: AccidentData
+):
 
-    print("\n=======================================")
-    print("          ACCIDENT RECEIVED")
-    print("=======================================")
-
-    print("Vehicle:", data.vehicle_id)
-    print("Impact:", data.impact)
-
-    print(
-        "Location:",
-        data.latitude,
-        ",",
-        data.longitude
-    )
-
-    print(
-        "Heart Rate:",
-        data.heart_rate
-    )
-
-    print(
-        "SpO2:",
-        data.spo2
-    )
-
-    print(
-        "Driver Response:",
-        data.driver_response
-    )
-
-
-    # --------------------------------------------------------
-    # FIND NEAREST HOSPITAL
-    # --------------------------------------------------------
-
-    hospital = find_nearest_hospital(
-        data.latitude,
-        data.longitude
-    )
-
-    if hospital is None:
-
-        return {
-            "success": False,
-            "message": "No hospitals available"
-        }
-
-
-    print("\n---------- NEAREST HOSPITAL ----------")
-
-    print(
-        "Hospital:",
-        hospital["name"]
-    )
-
-    print(
-        "Distance:",
-        hospital["distance_km"],
-        "km"
-    )
-
-    print(
-        "Phone:",
-        hospital["phone"]
-    )
-
-
-    # --------------------------------------------------------
-    # CREATE ALERT IN POSTGRESQL
-    # --------------------------------------------------------
-
-    alert_id = create_emergency_alert(
-        data,
-        hospital
-    )
-
-
-    # --------------------------------------------------------
-    # SEND REAL SMS USING TWILIO
-    # --------------------------------------------------------
-
-    sms_result = send_emergency_sms(
-        hospital["phone"]
-    )
-
-
-    # --------------------------------------------------------
-    # SERVER LOG
-    # --------------------------------------------------------
-
-    print("\n=======================================")
-    print("          EMERGENCY ALERT")
-    print("=======================================")
-
-    print(
-        "Alert ID:",
-        alert_id
-    )
+    print("\n============================")
+    print("ACCIDENT RECEIVED")
+    print("============================")
 
     print(
         "Vehicle:",
@@ -633,68 +700,79 @@ def receive_accident(data: AccidentData):
     )
 
     print(
-        "Accident Type:",
+        "Impact:",
         data.impact
     )
 
     print(
         "Location:",
         data.latitude,
-        ",",
         data.longitude
     )
 
-    print(
-        "Heart Rate:",
-        data.heart_rate,
-        "BPM"
+
+    # Find nearest hospital
+
+    hospital = find_nearest_hospital(
+        data.latitude,
+        data.longitude
     )
 
-    print(
-        "SpO2:",
-        data.spo2,
-        "%"
-    )
 
-    print("\nSEND TO:")
+    if hospital is None:
+
+        return {
+            "success": False,
+            "message":
+                "No hospitals available"
+        }
+
 
     print(
-        "Hospital:",
+        "Nearest Hospital:",
         hospital["name"]
     )
 
-    print(
-        "Phone:",
+
+    # Store emergency alert
+
+    alert_id = create_emergency_alert(
+        data,
+        hospital
+    )
+
+
+    # Send SMS
+
+    sms_result = send_emergency_sms(
         hospital["phone"]
     )
 
-    print("\nSMS Result:", sms_result)
-
-    print("\nStatus: PENDING")
-
-    print("=======================================\n")
-
-
-    # --------------------------------------------------------
-    # API RESPONSE
-    # --------------------------------------------------------
 
     return {
         "success": True,
-        "message": "Emergency alert created",
+        "message":
+            "Emergency alert created",
         "alert_id": alert_id,
-        "vehicle_id": data.vehicle_id,
-        "nearest_hospital": hospital,
-        "alert_status": "PENDING",
-        "sms": sms_result
+        "vehicle_id":
+            data.vehicle_id,
+        "nearest_hospital":
+            hospital,
+        "alert_status":
+            "PENDING",
+        "sms":
+            sms_result
     }
 
 
 # ============================================================
-# VIEW EMERGENCY ALERTS
+# ADMIN - VIEW ALERTS
 # ============================================================
 
-@app.get("/api/alerts")
+@app.get(
+    "/api/alerts",
+    dependencies=[Depends(verify_admin)]
+)
 def get_alerts():
 
     conn = get_connection()
