@@ -24,7 +24,41 @@ def get_connection():
 
     return psycopg2.connect(DATABASE_URL)
 
+def send_emergency_sms(phone, data, hospital):
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
+        message_text = (
+            f"EMERGENCY ALERT\n"
+            f"Vehicle: {data.vehicle_id}\n"
+            f"Impact: {data.impact}\n"
+            f"Heart Rate: {data.heart_rate} BPM\n"
+            f"SpO2: {data.spo2}%\n"
+            f"Location: {data.latitude}, {data.longitude}\n"
+            f"Hospital: {hospital['name']}"
+        )
+
+        message = client.messages.create(
+            body=message_text,
+            from_=TWILIO_FROM_NUMBER,
+            to=phone
+        )
+
+        print("SMS sent successfully")
+        print("Message SID:", message.sid)
+
+        return {
+            "success": True,
+            "message_sid": message.sid
+        }
+
+    except Exception as e:
+        print("SMS sending failed:", str(e))
+
+        return {
+            "success": False,
+            "error": str(e)
+        }
 # ============================================================
 # DATA MODELS
 # ============================================================
