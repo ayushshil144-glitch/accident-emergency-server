@@ -500,7 +500,11 @@ def receive_accident(data: AccidentData):
         data,
         hospital
     )
-
+    sms_result = send_emergency_sms(
+    hospital["phone"],
+    data,
+    hospital
+    )
     print("\n=======================================")
     print("          EMERGENCY ALERT")
     print("=======================================")
@@ -532,7 +536,8 @@ def receive_accident(data: AccidentData):
         "alert_id": alert_id,
         "vehicle_id": data.vehicle_id,
         "nearest_hospital": hospital,
-        "alert_status": "PENDING"
+        "alert_status": "PENDING",
+        "sms": sms_result
     }
 
 
