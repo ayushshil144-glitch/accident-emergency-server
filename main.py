@@ -1,3 +1,4 @@
+from twilio.rest import Client
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import psycopg2
@@ -12,7 +13,9 @@ app = FastAPI(title="Accident Emergency Server")
 # ============================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
 
 def get_connection():
 
