@@ -1,21 +1,37 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import sqlite3
+import psycopg2
+import os
 import math
-
-
-# ============================================================
-# FASTAPI APPLICATION
-# ============================================================
 
 app = FastAPI(title="Accident Emergency Server")
 
-DATABASE = "hospitals.db"
+
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+def get_connection():
+
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL environment variable not found")
+
+    return psycopg2.connect(DATABASE_URL)
 
 
 # ============================================================
-# ACCIDENT DATA FORMAT
+# DATA MODELS
 # ============================================================
+
+class HospitalData(BaseModel):
+    name: str
+    latitude: float
+    longitude: float
+    phone: str
+
 
 class AccidentData(BaseModel):
     vehicle_id: str
@@ -28,39 +44,33 @@ class AccidentData(BaseModel):
 
 
 # ============================================================
-# CREATE DATABASE
+# CREATE DATABASE TABLES
 # ============================================================
 
-def create_database():
+def create_tables():
 
-    conn = sqlite3.connect(DATABASE)
+    conn = get_connection()
     cursor = conn.cursor()
 
-    # --------------------------------------------------------
-    # Hospital Table
-    # --------------------------------------------------------
-
+    # Hospital table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS hospitals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
-            latitude REAL NOT NULL,
-            longitude REAL NOT NULL,
+            latitude DOUBLE PRECISION NOT NULL,
+            longitude DOUBLE PRECISION NOT NULL,
             phone TEXT
         )
     """)
 
-    # --------------------------------------------------------
-    # Emergency Alert Table
-    # --------------------------------------------------------
-
+    # Emergency alert table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS emergency_alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             vehicle_id TEXT NOT NULL,
             impact TEXT,
-            latitude REAL,
-            longitude REAL,
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
             heart_rate INTEGER,
             spo2 INTEGER,
             hospital_name TEXT,
@@ -70,63 +80,22 @@ def create_database():
         )
     """)
 
-    # --------------------------------------------------------
-    # Add test hospitals if database is empty
-    # --------------------------------------------------------
-
-    cursor.execute("SELECT COUNT(*) FROM hospitals")
-
-    count = cursor.fetchone()[0]
-
-    if count == 0:
-
-        hospitals = [
-
-            (
-                "Hospital A",
-                22.750000,
-                88.375000,
-                "TEST001"
-            ),
-
-            (
-                "Hospital B",
-                22.745000,
-                88.380000,
-                "TEST002"
-            ),
-
-            (
-                "Hospital C",
-                22.760000,
-                88.390000,
-                "TEST003"
-            )
-        ]
-
-        cursor.executemany("""
-            INSERT INTO hospitals (
-                name,
-                latitude,
-                longitude,
-                phone
-            )
-            VALUES (?, ?, ?, ?)
-        """, hospitals)
-
     conn.commit()
 
+    cursor.close()
     conn.close()
 
 
+# Create tables when server starts
+create_tables()
+
+
 # ============================================================
-# DISTANCE CALCULATION
-# HAVERSINE FORMULA
+# HAVERSINE DISTANCE
 # ============================================================
 
 def calculate_distance(lat1, lon1, lat2, lon2):
 
-    # Radius of Earth in kilometers
     R = 6371
 
     lat1 = math.radians(lat1)
@@ -153,9 +122,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
         math.sqrt(1 - a)
     )
 
-    distance = R * c
-
-    return distance
+    return R * c
 
 
 # ============================================================
@@ -164,8 +131,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 def find_nearest_hospital(latitude, longitude):
 
-    conn = sqlite3.connect(DATABASE)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -180,25 +146,19 @@ def find_nearest_hospital(latitude, longitude):
 
     hospitals = cursor.fetchall()
 
+    cursor.close()
     conn.close()
 
     nearest = None
-
     minimum_distance = float("inf")
 
     for hospital in hospitals:
 
-        hospital_id = hospital[0]
-        name = hospital[1]
-        hospital_lat = hospital[2]
-        hospital_lon = hospital[3]
-        phone = hospital[4]
-
         distance = calculate_distance(
             latitude,
             longitude,
-            hospital_lat,
-            hospital_lon
+            hospital[2],
+            hospital[3]
         )
 
         if distance < minimum_distance:
@@ -206,11 +166,11 @@ def find_nearest_hospital(latitude, longitude):
             minimum_distance = distance
 
             nearest = {
-                "id": hospital_id,
-                "name": name,
-                "latitude": hospital_lat,
-                "longitude": hospital_lon,
-                "phone": phone,
+                "id": hospital[0],
+                "name": hospital[1],
+                "latitude": hospital[2],
+                "longitude": hospital[3],
+                "phone": hospital[4],
                 "distance_km": round(distance, 2)
             }
 
@@ -223,13 +183,11 @@ def find_nearest_hospital(latitude, longitude):
 
 def create_emergency_alert(data, hospital):
 
-    conn = sqlite3.connect(DATABASE)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
         INSERT INTO emergency_alerts (
-
             vehicle_id,
             impact,
             latitude,
@@ -239,13 +197,13 @@ def create_emergency_alert(data, hospital):
             hospital_name,
             hospital_phone,
             status
-
         )
 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+
+        RETURNING id
 
     """, (
-
         data.vehicle_id,
         data.impact,
         data.latitude,
@@ -255,23 +213,16 @@ def create_emergency_alert(data, hospital):
         hospital["name"],
         hospital["phone"],
         "PENDING"
-
     ))
 
-    alert_id = cursor.lastrowid
+    alert_id = cursor.fetchone()[0]
 
     conn.commit()
 
+    cursor.close()
     conn.close()
 
     return alert_id
-
-
-# ============================================================
-# CREATE DATABASE WHEN SERVER STARTS
-# ============================================================
-
-create_database()
 
 
 # ============================================================
@@ -283,7 +234,51 @@ def home():
 
     return {
         "status": "online",
-        "message": "Accident Emergency Server is running"
+        "message": "Accident Emergency Server is running",
+        "database": "PostgreSQL"
+    }
+
+
+# ============================================================
+# ADD HOSPITAL
+# ============================================================
+
+@app.post("/api/hospitals")
+def add_hospital(hospital: HospitalData):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO hospitals (
+            name,
+            latitude,
+            longitude,
+            phone
+        )
+
+        VALUES (%s, %s, %s, %s)
+
+        RETURNING id
+
+    """, (
+        hospital.name,
+        hospital.latitude,
+        hospital.longitude,
+        hospital.phone
+    ))
+
+    hospital_id = cursor.fetchone()[0]
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "success": True,
+        "message": "Hospital added successfully",
+        "hospital_id": hospital_id
     }
 
 
@@ -294,8 +289,7 @@ def home():
 @app.get("/api/hospitals")
 def get_hospitals():
 
-    conn = sqlite3.connect(DATABASE)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -306,24 +300,128 @@ def get_hospitals():
             longitude,
             phone
         FROM hospitals
+
+        ORDER BY id
     """)
 
-    hospitals = cursor.fetchall()
+    rows = cursor.fetchall()
 
+    cursor.close()
     conn.close()
+
+    hospitals = []
+
+    for row in rows:
+
+        hospitals.append({
+            "id": row[0],
+            "name": row[1],
+            "latitude": row[2],
+            "longitude": row[3],
+            "phone": row[4]
+        })
 
     return hospitals
 
 
 # ============================================================
-# RECEIVE ACCIDENT FROM VEHICLE
+# UPDATE HOSPITAL
+# ============================================================
+
+@app.put("/api/hospitals/{hospital_id}")
+def update_hospital(
+    hospital_id: int,
+    hospital: HospitalData
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE hospitals
+
+        SET
+            name = %s,
+            latitude = %s,
+            longitude = %s,
+            phone = %s
+
+        WHERE id = %s
+
+        RETURNING id
+
+    """, (
+        hospital.name,
+        hospital.latitude,
+        hospital.longitude,
+        hospital.phone,
+        hospital_id
+    ))
+
+    updated = cursor.fetchone()
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    if updated is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Hospital not found"
+        )
+
+    return {
+        "success": True,
+        "message": "Hospital updated successfully"
+    }
+
+
+# ============================================================
+# DELETE HOSPITAL
+# ============================================================
+
+@app.delete("/api/hospitals/{hospital_id}")
+def delete_hospital(hospital_id: int):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        DELETE FROM hospitals
+        WHERE id = %s
+        RETURNING id
+    """, (hospital_id,))
+
+    deleted = cursor.fetchone()
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    if deleted is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Hospital not found"
+        )
+
+    return {
+        "success": True,
+        "message": "Hospital deleted successfully"
+    }
+
+
+# ============================================================
+# RECEIVE ACCIDENT
 # ============================================================
 
 @app.post("/api/accident")
 def receive_accident(data: AccidentData):
 
-    print("\n")
-    print("=======================================")
+    print("\n=======================================")
     print("          ACCIDENT RECEIVED")
     print("=======================================")
 
@@ -341,70 +439,37 @@ def receive_accident(data: AccidentData):
     print("SpO2:", data.spo2)
     print("Driver Response:", data.driver_response)
 
-
-    # --------------------------------------------------------
     # Find nearest hospital
-    # --------------------------------------------------------
-
     hospital = find_nearest_hospital(
         data.latitude,
         data.longitude
     )
 
-
-    # --------------------------------------------------------
-    # Safety check
-    # --------------------------------------------------------
-
     if hospital is None:
-
-        print("No hospital found in database.")
 
         return {
             "success": False,
-            "message": "No hospital available"
+            "message": "No hospitals available"
         }
 
-
-    print("\n")
-    print("---------------------------------------")
-    print("          NEAREST HOSPITAL")
-    print("---------------------------------------")
+    print("\n---------- NEAREST HOSPITAL ----------")
 
     print("Hospital:", hospital["name"])
-
-    print(
-        "Distance:",
-        hospital["distance_km"],
-        "km"
-    )
-
+    print("Distance:", hospital["distance_km"], "km")
     print("Phone:", hospital["phone"])
 
-
-    # --------------------------------------------------------
-    # Create Emergency Alert
-    # --------------------------------------------------------
-
+    # Create emergency alert
     alert_id = create_emergency_alert(
         data,
         hospital
     )
 
-
-    # --------------------------------------------------------
-    # Display Emergency Alert
-    # --------------------------------------------------------
-
-    print("\n")
-    print("=======================================")
+    print("\n=======================================")
     print("          EMERGENCY ALERT")
     print("=======================================")
 
     print("Alert ID:", alert_id)
-
     print("Vehicle:", data.vehicle_id)
-
     print("Accident Type:", data.impact)
 
     print(
@@ -414,75 +479,34 @@ def receive_accident(data: AccidentData):
         data.longitude
     )
 
-    print(
-        "Heart Rate:",
-        data.heart_rate,
-        "BPM"
-    )
-
-    print(
-        "SpO2:",
-        data.spo2,
-        "%"
-    )
-
-    print(
-        "Driver Response:",
-        data.driver_response
-    )
+    print("Heart Rate:", data.heart_rate, "BPM")
+    print("SpO2:", data.spo2, "%")
 
     print("\nSEND TO:")
-
-    print(
-        "Hospital:",
-        hospital["name"]
-    )
-
-    print(
-        "Phone:",
-        hospital["phone"]
-    )
+    print("Hospital:", hospital["name"])
+    print("Phone:", hospital["phone"])
 
     print("\nStatus: PENDING")
-
-    print("=======================================")
-    print("\n")
-
-
-    # --------------------------------------------------------
-    # Send response back to ESP
-    # --------------------------------------------------------
+    print("=======================================\n")
 
     return {
-
         "success": True,
-
-        "message":
-            "Emergency alert created successfully",
-
-        "alert_id":
-            alert_id,
-
-        "vehicle_id":
-            data.vehicle_id,
-
-        "nearest_hospital":
-            hospital,
-
-        "alert_status":
-            "PENDING"
+        "message": "Emergency alert created",
+        "alert_id": alert_id,
+        "vehicle_id": data.vehicle_id,
+        "nearest_hospital": hospital,
+        "alert_status": "PENDING"
     }
 
 
 # ============================================================
-# VIEW ALL EMERGENCY ALERTS
+# VIEW EMERGENCY ALERTS
 # ============================================================
 
 @app.get("/api/alerts")
 def get_alerts():
 
-    conn = sqlite3.connect(DATABASE)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -506,6 +530,7 @@ def get_alerts():
 
     rows = cursor.fetchall()
 
+    cursor.close()
     conn.close()
 
     alerts = []
@@ -513,27 +538,16 @@ def get_alerts():
     for row in rows:
 
         alerts.append({
-
             "alert_id": row[0],
-
             "vehicle_id": row[1],
-
             "impact": row[2],
-
             "latitude": row[3],
-
             "longitude": row[4],
-
             "heart_rate": row[5],
-
             "spo2": row[6],
-
             "hospital_name": row[7],
-
             "hospital_phone": row[8],
-
             "status": row[9],
-
             "created_at": row[10]
         })
 
